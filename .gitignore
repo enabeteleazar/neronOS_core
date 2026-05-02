@@ -1,0 +1,106 @@
+# =========================
+# SUBMODULE
+# =========================
+core/
+llm/
+doctor/
+client*/
+
+# =========================
+# PYTHON
+# =========================
+pycache/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Environnements virtuels
+venv/
+.env/
+.venv/
+ENV/
+
+# =========================
+# LOGS
+# =========================
+*.log
+logs/
+*.out
+*.err
+
+# =========================
+# CONFIG SENSIBLE
+# =========================
+*.env
+.env.
+.env.local
+neron.yaml
+neron.yaml.dev
+
+# =========================
+# TEST / COVERAGE
+# =========================
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# =========================
+# BUILD / DIST
+# =========================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# IDE / EDITORS
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# NERON SPECIFIC
+# =========================
+
+# runtime / cache
+data/
+cache/
+tmp/
+runtime/
+
+# modèles LLM locaux (très lourd)
+models/
+ollama/
+*.gguf
+*.bin
+
+# fichiers temporaires scripts
+*.bak
+*.save
+
+# =========================
+# GIT (sécurité)
+# =========================
+.gitmodules
+.git
+.github
+venv/
+.venv/
+
+# =========================
+# DIVERS
+# =========================
+/client/homeassistant/*
+!/client/homeassistant/.keep
+.claude
+.copilot
