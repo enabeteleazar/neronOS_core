@@ -1,0 +1,16 @@
+{
+  "communication": {
+    "tone": "technique",
+    "verbosity": "medium",
+    "format": "structuré"
+  },
+  "behavior": {
+    "proactive": true,
+    "suggest_improvements": true
+  },
+  "learning": {
+    "enabled": true
+  },
+  "mood": "neutre",
+  "energy_level": "normal"
+}
