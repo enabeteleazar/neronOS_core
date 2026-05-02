@@ -77,11 +77,12 @@ class Config:
     LLM_MAX_TOKENS  = int(_get(_cfg, "llm",   "max_tokens",                              default=2048))
 
     # Section lue par NéronLLMClient
-    _neron_llm_cfg = _cfg.get("neron_llm", {})
+    _neron_llm_cfg = _cfg.get("llm", {})
     NERON_LLM: dict = {
         "url":     _neron_llm_cfg.get("url",     "http://localhost:8765"),
         "timeout": float(_neron_llm_cfg.get("timeout", 30)),
         "retry":   int(_neron_llm_cfg.get("retry",   2)),
+        "api_key": _get(_cfg, "neron", "api_key", fallback_env="NERON_API_KEY", default=""),
     }
 
     # ── STT (désactivé — conservé pour compatibilité) ─────────────────────
