@@ -108,6 +108,12 @@ class AgentRouter:
     Dispatch une IntentResult vers l'agent approprié et retourne la réponse.
     """
 
+    def __init__(self, sessions=None, skills=None, llm_config=None, tools=None):
+        self.sessions   = sessions
+        self.skills     = skills
+        self.llm_config = llm_config
+        self.tools      = tools
+
     async def route(self, intent_result: IntentResult, query: str) -> str:
         intent = intent_result.intent
         logger.info("[AGENT_ROUTER] dispatching intent=%s", intent)
@@ -161,3 +167,27 @@ class AgentRouter:
             return result.content
 
         return f"⚠️ Erreur LLM : {result.error}"
+
+# ── Stubs de config attendus par app.py ───────────────────────────────────────
+from dataclasses import dataclass, field
+from typing import Any, Dict
+
+@dataclass
+class LLMConfig:
+    provider:    str   = "ollama"
+    model:       str   = "mistral"
+    base_url:    str   = "http://localhost:11434"
+    max_tokens:  int   = 2048
+    temperature: float = 0.7
+
+class ToolRegistry:
+    def __init__(self):
+        self._tools: Dict[str, Any] = {}
+
+    def setup_defaults(self) -> "ToolRegistry":
+        return self
+
+    def register(self, name: str, tool: Any) -> "ToolRegistry":
+        self._tools[name] = tool
+        return self
+

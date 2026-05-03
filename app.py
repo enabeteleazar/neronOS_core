@@ -358,7 +358,7 @@ async def lifespan(app: FastAPI):
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Neron Core",
+    title="neronOS_CORE",
     description="Orchestrateur central - v" + VERSION,
     version=VERSION,
     lifespan=lifespan,

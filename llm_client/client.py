@@ -55,6 +55,7 @@ class NéronLLMClient:
         self._base_url: str = cfg.get("url",     "http://localhost:8765").rstrip("/")
         self._timeout:  float = float(cfg.get("timeout", 30))
         self._retries:  int   = int(cfg.get("retry",   2))
+        self._api_key:  str   = cfg.get("api_key", "") or getattr(settings, "API_KEY", "")
 
         logger.info(
             json.dumps({
@@ -91,6 +92,8 @@ class NéronLLMClient:
             "Content-Type":        "application/json",
             "x-neron-request-id":  rid,
         }
+        if self._api_key:
+            headers["X-Neron-API-Key"] = self._api_key
 
         last_error: str | None = None
 
