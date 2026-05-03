@@ -1,5 +1,4 @@
 # core/app.py
-# Neron Core v3.0.0
 
 from __future__ import annotations
 
@@ -77,7 +76,7 @@ from core.agents.communication.telegram_agent import (
 from core.agents.communication.web_agent import WebAgent
 
 # IO
-from core.agents.io.stt_agent import STTAgent
+from core.agents.io.stt_agent import STTAgent, load_model
 from core.agents.io.tts_agent import TTSAgent
 
 
@@ -98,7 +97,7 @@ from core.pipeline.intent.intent_router import Intent, IntentRouter
 
 logger = get_logger("neron.core")
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 # ── Etat global ───────────────────────────────────────────────────────────────
 
@@ -236,6 +235,9 @@ async def lifespan(app: FastAPI):
     memory_init_db()
     memory_agent = MemoryAgent()
     ha_agent     = HAAgent()
+    stt_agent    = STTAgent()
+    await asyncio.get_event_loop().run_in_executor(None, load_model)
+
     code_agent       = CodeAgent()
     code_audit_agent = CodeAuditAgent()
 
