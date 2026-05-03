@@ -77,7 +77,7 @@ from core.agents.communication.telegram_agent import (
 from core.agents.communication.web_agent import WebAgent
 
 # IO
-from core.agents.io.stt_agent import STTAgent
+from core.agents.io.stt_agent import STTAgent, load_model
 from core.agents.io.tts_agent import TTSAgent
 
 
@@ -236,6 +236,9 @@ async def lifespan(app: FastAPI):
     memory_init_db()
     memory_agent = MemoryAgent()
     ha_agent     = HAAgent()
+    stt_agent    = STTAgent()
+    await asyncio.get_event_loop().run_in_executor(None, load_model)
+
     code_agent       = CodeAgent()
     code_audit_agent = CodeAuditAgent()
 
