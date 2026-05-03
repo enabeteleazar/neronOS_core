@@ -1,5 +1,4 @@
 # core/app.py
-# Neron Core v3.0.0
 
 from __future__ import annotations
 
@@ -98,7 +97,7 @@ from core.pipeline.intent.intent_router import Intent, IntentRouter
 
 logger = get_logger("neron.core")
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 # ── Etat global ───────────────────────────────────────────────────────────────
 
