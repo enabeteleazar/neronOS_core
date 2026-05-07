@@ -82,8 +82,6 @@ from core.agents.io.tts_agent import TTSAgent
 
 from core.config import settings
 from core.pipeline.routing.agent_router import AgentRouter, LLMConfig, ToolRegistry
-from core.pipeline.orchestrator import NLPOrchestrator
-from core.memory.persistent_store import get_store as get_persistent_store
 from core.gateway.gateway import GatewayConfig, NeronGateway
 from core.modules.scheduler import setup as scheduler_setup
 from core.modules.scheduler import start as scheduler_start
@@ -115,7 +113,6 @@ ha_agent:         HAAgent         | None = None
 code_agent:       CodeAgent       | None = None
 code_audit_agent: CodeAuditAgent  | None = None
 router:           IntentRouter    | None = None
-_orchestrator:    NLPOrchestrator | None = None
 time_provider:    TimeProvider    | None = None
 
 
@@ -288,9 +285,6 @@ async def lifespan(app: FastAPI):
             llm_config=llm_cfg,
             tools=_tools,
         )
-        global _orchestrator
-        _mem_store    = get_persistent_store()
-        _orchestrator = NLPOrchestrator(agent_router=_agent_router, store=_mem_store)
         gw_config = GatewayConfig(
             host=settings.SERVER_HOST,
             port=18789,
@@ -509,16 +503,10 @@ async def personality_reset(_: None = Depends(verify_api_key)):
 
 @app.post("/nlp/parse")
 async def nlp_parse(input_data: TextInput, _: None = Depends(verify_api_key)):
-    """Analyse NLP d'un texte brut — retourne intent, entities, confidence, plan."""
+    """Analyse NLP d'un texte brut — retourne intent, entities, confidence."""
     from core.pipeline.nlp.nlp_processor import process as nlp_process
-    result = nlp_process(input_data.text.strip(), session_id="api")
-    out = result.to_dict()
-    if result.plan and result.plan.is_multi:
-        out["plan"] = {
-            "mode":    result.plan.mode,
-            "actions": [a.query for a in result.plan.actions],
-        }
-    return out
+    result = nlp_process(input_data.text.strip())
+    return result.to_dict()
 
 
 # ── Routes /input ─────────────────────────────────────────────────────────────
@@ -530,29 +518,7 @@ async def text_input(input_data: TextInput, _: None = Depends(verify_api_key)):
     metrics.record_request_start()
     logger.info(json.dumps({"event": "request_received", "query": query[:80]}))
 
-    # Récupérer session_id depuis le header ou générer un défaut
-    session_id = getattr(input_data, "session_id", None) or "default"
-
-    # Vérifier si commande multi-action via l'orchestrateur
-    if _orchestrator is not None:
-        from core.pipeline.nlp.orchestrator_plan import build_plan
-        plan = build_plan(query)
-        if plan.is_multi:
-            orch_result = await _orchestrator.handle(query, session_id=session_id)
-            metadata = orch_result.to_metadata()
-            elapsed = round((time.monotonic() - start) * 1000, 2)
-            metrics.record_request_end(elapsed)
-            metrics.record_intent(orch_result.intent)
-            return CoreResponse(
-                response=orch_result.response,
-                intent=orch_result.intent,
-                agent="orchestrator",
-                confidence=metadata["confidence"],
-                timestamp=utc_now_iso(),
-                metadata=metadata,
-            )
-
-    intent_result = await router.route(query, session_id=session_id)
+    intent_result = await router.route(query)
     metrics.record_intent(intent_result.intent.value)
 
     metadata = {
