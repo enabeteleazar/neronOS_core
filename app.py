@@ -110,7 +110,7 @@ SYNC_INTERVAL = HA_CONFIG.get("sync_interval", 60)
 
 logger = get_logger("neron.core")
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 
 # ── Etat global ───────────────────────────────────────────────────────────────
 
