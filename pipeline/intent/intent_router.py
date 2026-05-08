@@ -1,30 +1,26 @@
 # core/pipeline/intent/intent_router.py
-# v2.0 — Ajout intents NEWS_QUERY, WEATHER_QUERY, TODO_ACTION, WIKI_QUERY
-#         Inspiré de la logique de dispatch de J.A.R.V.I.S (GauravSingh9356)
-#         portée dans le modèle agent Néron.
+# v2.1 — Intégration couche NLP (intent_classifier + entity_extractor)
+#         Backward-compatible : confidence str conservée, entities ajouté.
 
 from __future__ import annotations
 
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, Dict
 
 from core.agents.base_agent import get_logger
-from core.constants import (
-    CODE_KEYWORDS,
-    CODE_AUDIT_KEYWORDS,
-    HA_KEYWORDS,
-    NEWS_KEYWORDS,
-    PERSONALITY_KEYWORDS,
-    TIME_KEYWORDS,
-    TODO_KEYWORDS,
-    WEATHER_KEYWORDS,
-    WEB_KEYWORDS,
-    WIKI_KEYWORDS,
-)
 
 logger = get_logger(__name__)
 
+# ── NLP processor (lazy import pour éviter les circulaires) ───────────────────
+
+def _nlp():
+    from core.pipeline.nlp.nlp_processor import get_processor
+    return get_processor()
+
+
+# ── Intent enum ───────────────────────────────────────────────────────────────
 
 class Intent(str, Enum):
     CONVERSATION         = "conversation"
@@ -34,25 +30,35 @@ class Intent(str, Enum):
     PERSONALITY_FEEDBACK = "personality_feedback"
     CODE                 = "code"
     CODE_AUDIT           = "code_audit"
-    # ── Nouveaux intents v2.0 ─────────────────────────────────────────────────
     NEWS_QUERY           = "news_query"
     WEATHER_QUERY        = "weather_query"
     TODO_ACTION          = "todo_action"
     WIKI_QUERY           = "wiki_query"
 
 
+_INTENT_MAP: Dict[str, Intent] = {i.value: i for i in Intent}
+
+
 @dataclass
 class IntentResult:
-    intent:     Intent
-    confidence: str
+    intent:           Intent
+    confidence:       str                          # "high" | "medium" | "low" (compat)
+    confidence_score: float = 0.0                 # float [0.0-1.0] via NLP
+    entities:         Dict[str, Any] = field(default_factory=dict)
+
+    def to_nlp_dict(self) -> Dict[str, Any]:
+        """Sortie standard NLP exploitable par les agents."""
+        return {
+            "intent":     self.intent.value,
+            "entities":   self.entities,
+            "confidence": self.confidence_score,
+        }
 
 
 def _normalize(text: str) -> str:
-    """Normalise : minuscules + suppression des accents + apostrophes → espace."""
     n = unicodedata.normalize("NFD", text.lower().strip())
     n = "".join(c for c in n if unicodedata.category(c) != "Mn")
-    n = n.replace("'", " ").replace("'", " ").replace("`", " ")
-    return n
+    return n.replace("'", " ").replace("'", " ").replace("`", " ")
 
 
 class IntentRouter:
@@ -60,57 +66,22 @@ class IntentRouter:
         self.llm_agent = llm_agent
 
     async def route(self, query: str) -> IntentResult:
-        q_norm = _normalize(query)
+        # ── NLP processing ────────────────────────────────────────────────────
+        nlp_result = _nlp().process(query)
+        intent_str = nlp_result.intent
+        intent     = _INTENT_MAP.get(intent_str, Intent.CONVERSATION)
+        entities   = nlp_result.entities
+        score      = nlp_result.confidence
+        confidence = "high" if score >= 0.7 else ("medium" if score >= 0.4 else "low")
 
-        # ── 1. Feedback comportemental (priorité max) ─────────────────────────
-        for kw in PERSONALITY_KEYWORDS:
-            if _normalize(kw) in q_norm:
-                logger.info("[ROUTER] intent=personality_feedback — déclencheur: %r", kw)
-                return IntentResult(intent=Intent.PERSONALITY_FEEDBACK, confidence="high")
+        logger.info(
+            "[NLP] intent=%s confidence=%.3f entities=%s",
+            intent_str, score, entities,
+        )
 
-        # ── 2. Auto-audit Néron ───────────────────────────────────────────────
-        for kw in CODE_AUDIT_KEYWORDS:
-            if _normalize(kw) in q_norm:
-                logger.info("[ROUTER] intent=code_audit — déclencheur: %r", kw)
-                return IntentResult(intent=Intent.CODE_AUDIT, confidence="high")
-
-        # ── 3. Code / développement ───────────────────────────────────────────
-        for kw in CODE_KEYWORDS:
-            if _normalize(kw) in q_norm:
-                logger.info("[ROUTER] intent=code — déclencheur: %r", kw)
-                return IntentResult(intent=Intent.CODE, confidence="high")
-
-        # ── 4. Todo list ──────────────────────────────────────────────────────
-        if any(_normalize(w) in q_norm for w in TODO_KEYWORDS):
-            logger.info("[ROUTER] intent=todo_action")
-            return IntentResult(intent=Intent.TODO_ACTION, confidence="high")
-
-        # ── 5. Actualités ─────────────────────────────────────────────────────
-        if any(_normalize(w) in q_norm for w in NEWS_KEYWORDS):
-            logger.info("[ROUTER] intent=news_query")
-            return IntentResult(intent=Intent.NEWS_QUERY, confidence="high")
-
-        # ── 6. Météo ──────────────────────────────────────────────────────────
-        if any(_normalize(w) in q_norm for w in WEATHER_KEYWORDS):
-            logger.info("[ROUTER] intent=weather_query")
-            return IntentResult(intent=Intent.WEATHER_QUERY, confidence="high")
-
-        # ── 7. Wikipédia ──────────────────────────────────────────────────────
-        if any(_normalize(w) in q_norm for w in WIKI_KEYWORDS):
-            logger.info("[ROUTER] intent=wiki_query")
-            return IntentResult(intent=Intent.WIKI_QUERY, confidence="high")
-
-        # ── 8. Heure / date ───────────────────────────────────────────────────
-        if any(_normalize(w) in q_norm for w in TIME_KEYWORDS):
-            return IntentResult(intent=Intent.TIME_QUERY, confidence="high")
-
-        # ── 9. Recherche web ──────────────────────────────────────────────────
-        if any(_normalize(w) in q_norm for w in WEB_KEYWORDS):
-            return IntentResult(intent=Intent.WEB_SEARCH, confidence="high")
-
-        # ── 10. Home Assistant ────────────────────────────────────────────────
-        if any(_normalize(w) in q_norm for w in HA_KEYWORDS):
-            return IntentResult(intent=Intent.HA_ACTION, confidence="high")
-
-        # ── 11. Conversation générale (défaut) ────────────────────────────────
-        return IntentResult(intent=Intent.CONVERSATION, confidence="medium")
+        return IntentResult(
+            intent=intent,
+            confidence=confidence,
+            confidence_score=score,
+            entities=entities,
+        )

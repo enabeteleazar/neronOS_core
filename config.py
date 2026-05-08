@@ -195,3 +195,4 @@ def print_config() -> None:
 
 if __name__ == "__main__":
     print_config()
+

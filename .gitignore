@@ -10,6 +10,7 @@ client*/
 # PYTHON
 # =========================
 pycache/
+*__pycache__*
 *.py[cod]
 *.pyo
 *.pyd

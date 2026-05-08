@@ -91,13 +91,26 @@ from core.modules.skills import SkillRegistry
 from core.neron_time.time_provider import TimeProvider
 from core.pipeline.intent.intent_router import Intent, IntentRouter
 
+
+from core.integrations.homeassistant.client import HomeAssistantClient
+from core.integrations.homeassistant.registry import HARegistry
+from core.integrations.homeassistant.matcher import SmartMatcher
+from core.integrations.homeassistant.room_learner import RoomLearner
+from core.integrations.homeassistant.synonym_learner import SynonymLearner
+from core.integrations.homeassistant.sync import sync
+from core.config_loader import config
+HA_CONFIG = config.get("homeassistant", {})
+BASE_URL = HA_CONFIG.get("url")
+TOKEN = HA_CONFIG.get("token")
+SYNC_INTERVAL = HA_CONFIG.get("sync_interval", 60)
+
 # =========================
 # LOGGER LOCAL (OPTIONNEL PAR MODULE)
 # =========================
 
 logger = get_logger("neron.core")
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 
 # ── Etat global ───────────────────────────────────────────────────────────────
 
@@ -499,6 +512,16 @@ async def personality_reset(_: None = Depends(verify_api_key)):
         raise HTTPException(500, f"Erreur reset personality : {e}")
 
 
+# ── Route /nlp ────────────────────────────────────────────────────────────────
+
+@app.post("/nlp/parse")
+async def nlp_parse(input_data: TextInput, _: None = Depends(verify_api_key)):
+    """Analyse NLP d'un texte brut — retourne intent, entities, confidence."""
+    from core.pipeline.nlp.nlp_processor import process as nlp_process
+    result = nlp_process(input_data.text.strip())
+    return result.to_dict()
+
+
 # ── Routes /input ─────────────────────────────────────────────────────────────
 
 @app.post("/input/text", response_model=CoreResponse)
@@ -514,6 +537,7 @@ async def text_input(input_data: TextInput, _: None = Depends(verify_api_key)):
     metadata = {
         "intent":     intent_result.intent.value,
         "confidence": intent_result.confidence,
+        "nlp":        intent_result.to_nlp_dict(),
     }
 
     try:

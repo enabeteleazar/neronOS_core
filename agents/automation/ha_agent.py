@@ -1,142 +1,200 @@
-
 # agents/ha_agent.py
 # Neron Core - Agent Home Assistant (REST API directe)
-
 from __future__ import annotations
-
 import asyncio
 import unicodedata
 from typing import Any
-
 import httpx
-
 from core.agents.base_agent import BaseAgent, AgentResult
 from core.config import settings
 
 # ── Constantes ────────────────────────────────────────────────────────────────
-
 HA_URL              = getattr(settings, "HA_URL",              "http://homeassistant.local:8123")
 HA_TOKEN            = getattr(settings, "HA_TOKEN",            "")
 HA_ENABLED          = getattr(settings, "HA_ENABLED",          False)
-HA_REFRESH_INTERVAL = int(getattr(settings, "HA_REFRESH_INTERVAL", 5))  # minutes
-
-# FIX: HA_TIMEOUT externalisé depuis settings avec fallback
-HA_TIMEOUT = float(getattr(settings, "HA_TIMEOUT", 10.0))
+HA_REFRESH_INTERVAL = int(getattr(settings, "HA_REFRESH_INTERVAL", 5))
+HA_TIMEOUT          = float(getattr(settings, "HA_TIMEOUT",    10.0))
 
 # ── Mapping actions ───────────────────────────────────────────────────────────
+TURN_OFF_KEYS = [
+    "eteins", "eteint", "eteignez",
+    "desactive", "desactiver",
+    "ferme", "fermer",
+    "arrete", "arreter",
+    "coupe", "couper",
+    "stoppe", "stopper",
+    "baisse",
+]
+TURN_ON_KEYS = [
+    "allume", "allumer", "allumez",
+    "active", "activer",
+    "ouvre", "ouvrir",
+    "demarre", "demarrer",
+    "mets", "mettre",
+    "lance", "lancer",
+    "monte",
+]
+STATUS_KEYS = [
+    "etat", "statut",
+    "quelle est", "quel est",
+    "est-ce que", "est ce que",
+    "combien",
+]
 
-TURN_ON_KEYS  = ["allume", "active", "ouvre", "demarre", "mets"]
-TURN_OFF_KEYS = ["eteins", "desactive", "ferme", "arrete", "coupe"]
-STATUS_KEYS   = ["etat", "statut", "allume", "eteint", "actif", "quelle est", "quel est", "est-ce que"]
+# Marqueurs de pluriel → commande sur TOUTES les entités du domaine
+PLURAL_MARKERS = [
+    "les ", "toutes", "tous",
+    "lumieres", "lampes", "volets", "stores",
+]
 
-# Domaines HA par mots-clés
 DOMAIN_KEYWORDS: dict[str, list[str]] = {
-    "light":               ["lumiere", "lampe", "plafonnier", "led", "spot", "ampoule"],
-    "cover":               ["volet", "store", "rideau", "portail"],
+    "light":               ["lumiere", "lumieres", "lampe", "lampes", "plafonnier",
+                            "led", "spot", "ampoule", "eclairage"],
+    "cover":               ["volet", "volets", "store", "rideau", "portail"],
     "climate":             ["thermostat", "chauffage", "climatiseur", "clim"],
     "switch":              ["prise", "interrupteur"],
     "fan":                 ["ventilateur", "vmc"],
     "alarm_control_panel": ["alarme"],
     "scene":               ["scene"],
+    "media_player":        ["tv", "tele", "musique", "media", "spotify", "radio"],
 }
 
-
-# ── Helpers de parsing ────────────────────────────────────────────────────────
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFD", text.lower().strip())
     return "".join(c for c in text if unicodedata.category(c) != "Mn")
 
 
-def _detect_domain(query_norm: str) -> str | None:
-    for domain, keywords in DOMAIN_KEYWORDS.items():
-        for kw in keywords:
-            if kw in query_norm:
+def _detect_domain(q: str) -> str | None:
+    for domain, kws in DOMAIN_KEYWORDS.items():
+        for kw in kws:
+            if kw in q:
                 return domain
     return None
 
 
-def _score_entity(query_norm: str, entity: dict) -> int:
+def _detect_action(q: str) -> str:
+    # Ordre : turn_off → turn_on → get_state (turn_off évalué en premier)
+    for k in TURN_OFF_KEYS:
+        if k in q:
+            return "turn_off"
+    for k in TURN_ON_KEYS:
+        if k in q:
+            return "turn_on"
+    for k in STATUS_KEYS:
+        if k in q:
+            return "get_state"
+    return "turn_on"
+
+
+def _is_plural(q: str) -> bool:
+    return any(m in q for m in PLURAL_MARKERS)
+
+
+def _score_entity(q: str, entity: dict, room_hint: str = "") -> int:
     """
-    Score de pertinence d'une entité pour une query.
-    FIX: suppression du double comptage — entity_id et ses parties
-    ne sont plus scorés deux fois pour le même mot.
+    Score de pertinence. Bonus si le room_hint NLP correspond à l'entité.
     """
     score     = 0
     entity_id = _normalize(entity.get("entity_id", ""))
     friendly  = _normalize(entity.get("attributes", {}).get("friendly_name", ""))
-    parts     = entity_id.split(".")  # ["light", "salon"]
+    parts     = entity_id.split(".")
 
-    for word in query_norm.split():
+    for word in q.split():
         if len(word) < 3:
             continue
-        # Priorité : présence dans le friendly_name
         if word in friendly:
             score += 3
-        # Présence dans une partie spécifique de l'entity_id (ex: "salon")
         elif any(word in part for part in parts):
             score += 2
-        # Présence quelconque dans l'entity_id complet
         elif word in entity_id:
             score += 1
+
+    # Bonus room_hint extrait par le NLP (ex: room='chambre')
+    if room_hint:
+        target = f"{entity_id} {friendly}"
+        if room_hint in target:
+            score += 4
 
     return score
 
 
-def _detect_action(query_norm: str) -> str:
+def _parse_query(
+    query: str,
+    ha_states: list,
+    entities: dict | None = None,
+) -> dict:
     """
-    Détecte l'action demandée dans la query normalisée.
-    FIX: détection explicite de turn_on, turn_off et get_state.
-    Par défaut : turn_on (comportement documenté).
+    Retourne un dict avec :
+      - action, domain, entity_ids (list), friendly, current_state, matched
+    entity_ids est toujours une liste (peut contenir plusieurs entités).
     """
-    for k in STATUS_KEYS:
-        if k in query_norm:
-            return "get_state"
-    for k in TURN_OFF_KEYS:
-        if k in query_norm:
-            return "turn_off"
-    for k in TURN_ON_KEYS:
-        if k in query_norm:
-            return "turn_on"
-    # Défaut documenté : si aucun mot-clé d'action n'est trouvé → turn_on
-    return "turn_on"
+    q       = _normalize(query)
+    action  = _detect_action(q)
+    domain  = _detect_domain(q)
+    entities = entities or {}
 
+    # Room hint depuis le NLP pipeline
+    room_hint = _normalize(entities.get("room", "") or "")
 
-def _parse_query(query: str, ha_states: list) -> dict:
-    q               = _normalize(query)
-    action          = _detect_action(q)
-    detected_domain = _detect_domain(q)
-
+    # Filtre par domaine
     candidates = ha_states
-    if detected_domain:
-        filtered   = [e for e in ha_states if e.get("entity_id", "").startswith(detected_domain + ".")]
+    if domain:
+        filtered   = [e for e in ha_states if e.get("entity_id", "").startswith(domain + ".")]
         candidates = filtered if filtered else ha_states
 
-    scored = [
-        (entity, _score_entity(q, entity))
-        for entity in candidates
-    ]
-    scored = [(e, s) for e, s in scored if s > 0]
+    # Commande plurielle → toutes les entités du domaine
+    if _is_plural(q) and domain and candidates:
+        ids      = [e["entity_id"] for e in candidates]
+        friendly = f"{len(ids)} entités ({domain})"
+        return {
+            "action":        action,
+            "domain":        domain,
+            "entity_ids":    ids,
+            "friendly":      friendly,
+            "current_state": "—",
+            "matched":       True,
+        }
+
+    # Score individuel
+    scored = [(e, _score_entity(q, e, room_hint)) for e in candidates]
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    if scored:
-        best_entity = scored[0][0]
-        entity_id   = best_entity["entity_id"]
-        domain      = entity_id.split(".")[0]
-        friendly    = best_entity.get("attributes", {}).get("friendly_name", entity_id)
-        current_state = best_entity.get("state", "unknown")
-        matched     = True
+    best_score = scored[0][1] if scored else 0
+
+    if best_score > 0:
+        # Prend tous les ex-æquo au meilleur score
+        top    = [e for e, s in scored if s == best_score]
+        ids    = [e["entity_id"] for e in top]
+        best   = top[0]
+        matched = True
+    elif candidates and domain:
+        # Domaine trouvé mais aucun score positif :
+        # → on utilise quand même les entités du domaine (meilleur effort)
+        ids     = [e["entity_id"] for e in candidates]
+        best    = candidates[0]
+        matched = True
     else:
-        domain        = detected_domain or "light"
-        entity_id     = f"{domain}.inconnu"
-        friendly      = entity_id
-        current_state = "unknown"
-        matched       = False
+        return {
+            "action":        action,
+            "domain":        domain or "light",
+            "entity_ids":    [],
+            "friendly":      "entité inconnue",
+            "current_state": "unknown",
+            "matched":       False,
+        }
+
+    friendly      = best.get("attributes", {}).get("friendly_name", best["entity_id"])
+    current_state = best.get("state", "unknown")
+
+    # Si plusieurs entités sélectionnées, on le mentionne
+    if len(ids) > 1:
+        friendly = f"{friendly} (+{len(ids)-1})"
 
     return {
         "action":        action,
-        "domain":        domain,
-        "entity_id":     entity_id,
+        "domain":        domain or best["entity_id"].split(".")[0],
+        "entity_ids":    ids,
         "friendly":      friendly,
         "current_state": current_state,
         "matched":       matched,
@@ -144,9 +202,8 @@ def _parse_query(query: str, ha_states: list) -> dict:
 
 
 def _build_response(parsed: dict) -> str:
-    """Construit une réponse lisible selon l'action et le domaine."""
-    action  = parsed["action"]
-    domain  = parsed["domain"]
+    action   = parsed["action"]
+    domain   = parsed["domain"]
     friendly = parsed["friendly"].rstrip(".")
 
     if action == "get_state":
@@ -157,17 +214,14 @@ def _build_response(parsed: dict) -> str:
         action_label = "ouvert" if action == "turn_on" else "fermé"
     elif domain == "climate":
         action_label = "activé" if action == "turn_on" else "désactivé"
+    elif domain == "media_player":
+        action_label = "démarré" if action == "turn_on" else "arrêté"
 
     return f"J'ai {action_label} {friendly}."
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
-
-
 class HAAgent(BaseAgent):
-    """
-    Agent Home Assistant — contrôle les entités via REST API.
-    """
 
     def __init__(self) -> None:
         super().__init__(name="ha_agent")
@@ -175,29 +229,32 @@ class HAAgent(BaseAgent):
             "Authorization": f"Bearer {HA_TOKEN}",
             "Content-Type":  "application/json",
         }
-        self._ha_states:    list                  = []
-        self._refresh_task: asyncio.Task | None   = None
+        self._ha_states:    list                = []
+        self._refresh_task: asyncio.Task | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
-
     async def on_start(self) -> None:
-        if not HA_ENABLED or not HA_TOKEN:
-            self.logger.warning("HA désactivé ou token manquant — states non chargés")
+        if not HA_ENABLED:
+            self.logger.warning("HA désactivé (HA_ENABLED=false dans neron.yaml)")
+            return
+        if not HA_TOKEN:
+            self.logger.warning("HA_TOKEN manquant dans neron.yaml")
             return
 
+        self.logger.info("Connexion à %s …", HA_URL)
         self._ha_states = await self.get_states()
-        self.logger.info("HA states chargés : %d entités", len(self._ha_states))
+
+        if not self._ha_states:
+            self.logger.error(
+                "HA: 0 entité chargée — vérifiez HA_URL (%s) et HA_TOKEN", HA_URL
+            )
+        else:
+            self.logger.info("HA states chargés : %d entités", len(self._ha_states))
 
         self._refresh_task = asyncio.create_task(self._refresh_loop())
-        self.logger.info(
-            "HA refresh loop démarrée — intervalle : %d min", HA_REFRESH_INTERVAL
-        )
+        self.logger.info("HA refresh loop démarrée (intervalle : %d min)", HA_REFRESH_INTERVAL)
 
     async def on_stop(self) -> None:
-        """
-        FIX: on_stop() documenté et implémenté — annule la refresh task
-        pour éviter les tasks zombies. À appeler depuis le lifecycle Néron.
-        """
         if self._refresh_task and not self._refresh_task.done():
             self._refresh_task.cancel()
             try:
@@ -212,31 +269,37 @@ class HAAgent(BaseAgent):
             await self.reload()
 
     async def reload(self) -> int:
-        self.logger.info("HA reload — rechargement des entités...")
         states = await self.get_states()
         if states:
             self._ha_states = states
             self.logger.info("HA reload OK — %d entités", len(self._ha_states))
         else:
-            self.logger.warning("HA reload — aucune entité récupérée, cache conservé")
+            self.logger.warning("HA reload — cache conservé (%d entités)", len(self._ha_states))
         return len(self._ha_states)
 
-    # ── Point d'entrée principal ──────────────────────────────────────────
-
+    # ── Execute ───────────────────────────────────────────────────────────
     async def execute(self, query: str, **kwargs: Any) -> AgentResult:
         if not HA_ENABLED:
-            return self._failure("Home Assistant non activé — configurez : make ha-agent")
+            return self._failure("Home Assistant non activé — configurez HA_ENABLED dans neron.yaml")
         if not HA_TOKEN:
-            return self._failure("Token Home Assistant manquant dans neron.yaml")
+            return self._failure("Token HA manquant — configurez HA_TOKEN dans neron.yaml")
 
-        self.logger.info("HA action pour : %r", query)
+        # Entités extraites par le NLP pipeline (room, device, target_state…)
+        nlp_entities: dict = kwargs.get("entities", {}) or {}
+
+        self.logger.info("HA action pour : %r  |  NLP entities : %s", query, nlp_entities)
         start = self._timer()
 
         if not self._ha_states:
-            self.logger.warning("Cache HA vide — tentative de rechargement")
+            self.logger.warning("Cache HA vide — rechargement live")
             self._ha_states = await self.get_states()
+            if not self._ha_states:
+                return self._failure(
+                    f"Home Assistant inaccessible ({HA_URL}) — vérifiez HA_URL et HA_TOKEN",
+                    latency_ms=self._elapsed_ms(start),
+                )
 
-        parsed = _parse_query(query, self._ha_states)
+        parsed = _parse_query(query, self._ha_states, entities=nlp_entities)
         self.logger.info("Parsed : %s", parsed)
 
         if not parsed["matched"]:
@@ -245,13 +308,11 @@ class HAAgent(BaseAgent):
                 latency_ms=self._elapsed_ms(start),
             )
 
-        # get_state ne nécessite pas d'appel service
         if parsed["action"] == "get_state":
-            response_text = _build_response(parsed)
             return self._success(
-                content=response_text,
+                content=_build_response(parsed),
                 metadata={
-                    "entity_id":     parsed["entity_id"],
+                    "entity_ids":    parsed["entity_ids"],
                     "friendly":      parsed["friendly"],
                     "action":        "get_state",
                     "current_state": parsed["current_state"],
@@ -260,84 +321,77 @@ class HAAgent(BaseAgent):
             )
 
         service_url = f"{HA_URL}/api/services/{parsed['domain']}/{parsed['action']}"
-        payload     = {"entity_id": parsed["entity_id"]}
+        # entity_id accepte une liste dans l'API HA
+        payload     = {"entity_id": parsed["entity_ids"]}
 
         try:
             async with httpx.AsyncClient(timeout=HA_TIMEOUT) as client:
-                response = await client.post(
-                    service_url, headers=self._headers, json=payload
-                )
-                response.raise_for_status()
-
+                resp = await client.post(service_url, headers=self._headers, json=payload)
+                resp.raise_for_status()
         except httpx.TimeoutException:
             return self._failure("Home Assistant timeout", latency_ms=self._elapsed_ms(start))
         except httpx.ConnectError:
             return self._failure(
-                f"Home Assistant inaccessible : {HA_URL}",
-                latency_ms=self._elapsed_ms(start),
+                f"Home Assistant inaccessible : {HA_URL}", latency_ms=self._elapsed_ms(start)
             )
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                return self._failure(
-                    "Token Home Assistant invalide",
-                    latency_ms=self._elapsed_ms(start),
-                )
+                return self._failure("Token HA invalide ou expiré", latency_ms=self._elapsed_ms(start))
             if e.response.status_code == 404:
                 return self._failure(
-                    f"Entité introuvable : {parsed['entity_id']}",
+                    f"Service introuvable : {parsed['domain']}/{parsed['action']}",
                     latency_ms=self._elapsed_ms(start),
                 )
             return self._failure(
-                f"Erreur HA HTTP {e.response.status_code}",
-                latency_ms=self._elapsed_ms(start),
+                f"Erreur HA HTTP {e.response.status_code}", latency_ms=self._elapsed_ms(start)
             )
         except Exception as e:
-            return self._failure(
-                f"Erreur inattendue HA : {e}",
-                latency_ms=self._elapsed_ms(start),
-            )
+            return self._failure(f"Erreur inattendue HA : {e}", latency_ms=self._elapsed_ms(start))
 
-        latency       = self._elapsed_ms(start)
-        response_text = _build_response(parsed)
-        self.logger.info("HA OK : %s (%sms)", response_text, latency)
+        latency = self._elapsed_ms(start)
+        self.logger.info(
+            "HA OK : %s → %s  entities=%s  (%sms)",
+            parsed["domain"], parsed["action"], parsed["entity_ids"], latency,
+        )
 
         return self._success(
-            content=response_text,
+            content=_build_response(parsed),
             metadata={
-                "entity_id": parsed["entity_id"],
-                "friendly":  parsed["friendly"],
-                "action":    parsed["action"],
-                "domain":    parsed["domain"],
-                "ha_url":    HA_URL,
+                "entity_ids": parsed["entity_ids"],
+                "friendly":   parsed["friendly"],
+                "action":     parsed["action"],
+                "domain":     parsed["domain"],
+                "ha_url":     HA_URL,
             },
             latency_ms=latency,
         )
 
     # ── API HA ────────────────────────────────────────────────────────────
-
     async def get_states(self) -> list:
-        """Récupère toutes les entités HA depuis l'API REST."""
         try:
             async with httpx.AsyncClient(timeout=HA_TIMEOUT) as client:
-                response = await client.get(
-                    f"{HA_URL}/api/states", headers=self._headers
-                )
-                response.raise_for_status()
-                return response.json()
+                resp = await client.get(f"{HA_URL}/api/states", headers=self._headers)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            self.logger.error(
+                "get_states HTTP %d%s", e.response.status_code,
+                " — token invalide, vérifiez HA_TOKEN" if e.response.status_code == 401 else "",
+            )
+            return []
+        except httpx.ConnectError:
+            self.logger.error("get_states : impossible de joindre %s — vérifiez HA_URL", HA_URL)
+            return []
         except Exception as e:
-            self.logger.error("Erreur get_states : %s", e)
+            self.logger.error("get_states : %s", e)
             return []
 
     async def check_connection(self) -> bool:
-        """Vérifie la connectivité avec Home Assistant."""
         if not HA_ENABLED or not HA_TOKEN:
             return False
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get(
-                    f"{HA_URL}/api/", headers=self._headers
-                )
-                return response.status_code == 200
-        except Exception as e:
-            self.logger.warning("HA check_connection failed : %s", e)
+                resp = await client.get(f"{HA_URL}/api/", headers=self._headers)
+                return resp.status_code == 200
+        except Exception:
             return False
