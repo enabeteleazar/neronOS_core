@@ -91,7 +91,6 @@ from core.modules.skills import SkillRegistry
 from core.neron_time.time_provider import TimeProvider
 from core.pipeline.intent.intent_router import Intent, IntentRouter
 
-
 from core.integrations.homeassistant.client import HomeAssistantClient
 from core.integrations.homeassistant.registry import HARegistry
 from core.integrations.homeassistant.matcher import SmartMatcher
@@ -103,6 +102,8 @@ HA_CONFIG = config.get("homeassistant", {})
 BASE_URL = HA_CONFIG.get("url")
 TOKEN = HA_CONFIG.get("token")
 SYNC_INTERVAL = HA_CONFIG.get("sync_interval", 60)
+
+from agents.memory.obsidian_agent import ObsidianAgent
 
 # =========================
 # LOGGER LOCAL (OPTIONNEL PAR MODULE)
@@ -127,6 +128,7 @@ code_agent:       CodeAgent       | None = None
 code_audit_agent: CodeAuditAgent  | None = None
 router:           IntentRouter    | None = None
 time_provider:    TimeProvider    | None = None
+obsidian_agent:   ObsidianAgent   | None = None
 
 
 def utc_now_iso() -> str:
@@ -237,7 +239,7 @@ metrics = Metrics()
 async def lifespan(app: FastAPI):
     global llm_agent, web_agent, stt_agent, tts_agent, ha_agent
     global router, time_provider, _startup_time, memory_agent
-    global code_agent, code_audit_agent, _gateway_task
+    global code_agent, code_audit_agent, _gateway_task, obsidian_agent
 
     _startup_time = time.monotonic()
     logger.info(json.dumps({"event": "startup", "version": VERSION}))
@@ -253,6 +255,7 @@ async def lifespan(app: FastAPI):
 
     code_agent       = CodeAgent()
     code_audit_agent = CodeAuditAgent()
+    obsidian_agent = ObsidianAgent("/etc/neron/obsidian-vault")
 
     await ha_agent.on_start()
     router        = IntentRouter(llm_agent=llm_agent)
@@ -553,6 +556,25 @@ async def text_input(input_data: TextInput, _: None = Depends(verify_api_key)):
             return await _handle_code_audit(intent_result, metadata, start)
         elif intent_result.intent == Intent.CODE:
             return await _handle_code(query, intent_result, metadata, start)
+
+        memory_keywords = [
+            "ajoute une idée",
+            "note ceci",
+            "mémorise",
+            "memorise",
+            "sauvegarde ceci",
+            "enregistre ceci",
+            "retient ceci",
+            "cherche dans obsidian",
+            "recherche mémoire",
+            "cherche dans la mémoire",
+            "retrouve mes notes",
+            "mémoire obsidian",
+        ]
+
+        if any(keyword in query.lower() for keyword in memory_keywords):
+            return await _handle_memory(query, intent_result, metadata, start)
+
         else:
             return await _handle_conversation(query, intent_result, metadata, start)
     finally:
@@ -910,3 +932,44 @@ async def _handle_code(query, intent_result, metadata, start) -> CoreResponse:
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host=settings.SERVER_HOST, port=settings.SERVER_PORT)
+
+# ── Handler Obsidian Memory ───────────────────────────────────────────────────
+
+def _is_memory_query(query: str) -> bool:
+    q = query.lower()
+    memory_keywords = [
+        "ajoute une idée",
+        "ajoute une idee",
+        "note ceci",
+        "mémorise",
+        "memorise",
+        "sauvegarde ceci",
+        "enregistre ceci",
+        "retient ceci",
+        "cherche dans obsidian",
+        "recherche mémoire",
+        "recherche memoire",
+        "cherche dans la mémoire",
+        "cherche dans la memoire",
+        "retrouve mes notes",
+        "mémoire obsidian",
+        "memoire obsidian",
+    ]
+    return any(keyword in q for keyword in memory_keywords)
+
+
+async def _handle_memory(query, intent_result, metadata, start) -> CoreResponse:
+    result = obsidian_agent.handle(query)
+
+    return CoreResponse(
+        response=result.get("response", ""),
+        intent=result.get("intent", "memory"),
+        agent=result.get("agent", "obsidian_agent"),
+        confidence=intent_result.confidence,
+        timestamp=utc_now_iso(),
+        execution_time_ms=round((time.monotonic() - start) * 1000, 2),
+        model=None,
+        error=result.get("error"),
+        transcription=None,
+        metadata={**metadata, "memory": result},
+    )
